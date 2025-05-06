@@ -154,7 +154,8 @@ func main() {
 	}
 	defer dupToken.Close()
 
-	command := fmt.Sprintf(`powershell.exe -ExecutionPolicy Bypass -File "%s"`, ps1Path)
+	scriptPath := *ps1Path
+	command := fmt.Sprintf(`powershell.exe -ExecutionPolicy Bypass -File "%s"`, scriptPath)
 
 	err = createProcessAsUser(dupToken, command)
 	if err != nil {
