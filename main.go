@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -27,8 +29,7 @@ type WTSSessionInfo struct {
 }
 
 var (
-	modWtsapi32 = syscall.NewLazyDLL("wtsapi32.dll")
-
+	modWtsapi32                     = syscall.NewLazyDLL("wtsapi32.dll")
 	procWTSQueryUserToken           = modWtsapi32.NewProc("WTSQueryUserToken")
 	procWTSEnumerateSessionsW       = modWtsapi32.NewProc("WTSEnumerateSessionsW")
 	procWTSFreeMemory               = modWtsapi32.NewProc("WTSFreeMemory")
@@ -44,7 +45,9 @@ func findActiveUserSession() (uint32, error) {
 	var count uint32
 
 	r1, _, err := procWTSEnumerateSessionsW.Call(
-		0, 0, 1, uintptr(unsafe.Pointer(&pSessionInfo)), uintptr(unsafe.Pointer(&count)),
+		0, 0, 1,
+		uintptr(unsafe.Pointer(&pSessionInfo)),
+		uintptr(unsafe.Pointer(&count)),
 	)
 	if r1 == 0 {
 		return 0, err
@@ -80,7 +83,10 @@ func findActiveUserSession() (uint32, error) {
 
 func queryUserToken(sessionID uint32) (windows.Token, error) {
 	var hToken windows.Token
-	r1, _, err := procWTSQueryUserToken.Call(uintptr(sessionID), uintptr(unsafe.Pointer(&hToken)))
+	r1, _, err := procWTSQueryUserToken.Call(
+		uintptr(sessionID),
+		uintptr(unsafe.Pointer(&hToken)),
+	)
 	if r1 == 0 {
 		return 0, err
 	}
@@ -137,6 +143,18 @@ func main() {
 	ps1Path := flag.String("ps1", "", "Path to the PowerShell script to execute")
 	flag.Parse()
 
+	if *ps1Path == "" {
+		log.Fatal("please specify --ps1 <path to script>")
+	}
+
+	scriptPath := *ps1Path
+	// verify the script exists and is not a directory
+	if info, err := os.Stat(scriptPath); err != nil {
+		log.Fatalf("script %q not found or inaccessible: %v", scriptPath, err)
+	} else if info.IsDir() {
+		log.Fatalf("script %q is a directory, not a file", scriptPath)
+	}
+
 	sessionID, err := findActiveUserSession()
 	if err != nil {
 		log.Fatalf("Failed to find user session: %v", err)
@@ -154,11 +172,19 @@ func main() {
 	}
 	defer dupToken.Close()
 
-	scriptPath := *ps1Path
-	command := fmt.Sprintf(`powershell.exe -ExecutionPolicy Bypass -File "%s"`, scriptPath)
+	// if it’s a local drive path, switch to the admin UNC share
+	if strings.HasMatch(scriptPath, `^[A-Za-z]:\\`) {
+		drive := strings.ToLower(scriptPath[:1])
+		scriptPath = fmt.Sprintf(`\\localhost\%s$%s`, drive, scriptPath[2:])
+	}
 
-	err = createProcessAsUser(dupToken, command)
-	if err != nil {
+	// dot-source via -Command to avoid -File path resolution issues
+	command := fmt.Sprintf(
+		`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& { . '%s' }"`,
+		scriptPath,
+	)
+
+	if err := createProcessAsUser(dupToken, command); err != nil {
 		log.Fatalf("createProcessAsUser failed: %v", err)
 	}
 
